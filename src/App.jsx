@@ -1,0 +1,300 @@
+import { useState, useEffect, useCallback, useRef } from "react";
+import { supabase } from "./supabase";
+
+const ADMIN_PIN="1234",HOURS_PER_DAY=8,HOURLY_MAX_DAYS=5,HOURLY_MAX_H=40,IS_APRIL_PLUS=new Date().getMonth()>=3,MAX_TRIES=5;
+const RED="#c0181f",GOLD="#b07800",GREEN="#1a7a4a",GRAY="#888",LIGHT="#f5f5f5";
+const RAINBOW=["#e74c3c","#e67e22","#f1c40f","#2ecc71","#1abc9c","#3498db","#9b59b6","#e74c3c","#e67e22","#f1c40f","#2ecc71","#1abc9c","#3498db","#9b59b6","#e74c3c","#e67e22","#f1c40f"];
+
+const hd=h=>{if(h<=0)return"0h";const d=Math.floor(h/HOURS_PER_DAY),r=h%HOURS_PER_DAY;if(d>0&&r>0)return`${d}日${r}h`;if(d>0)return`${d}日`;return`${r}h`;};
+const fmtDays=d=>{if(d<=0)return"0日";return d%1!==0?`${Math.floor(d)}.5日`:`${d}日`;};
+const addDays=(s,n)=>{const d=new Date(s);d.setDate(d.getDate()+n);return d.toISOString().slice(0,10);};
+const ini=n=>n?n[0]:"?";
+const eColor=id=>RAINBOW[(id-1)%RAINBOW.length];
+const isLocked=(t,id)=>(t[id]||0)>=MAX_TRIES;
+
+function calcStats(emp,reqs){
+  const totalH=(emp.total_days||0)*HOURS_PER_DAY;
+  const approvedH=reqs.filter(r=>r.emp_id===emp.id&&r.status==="approved").reduce((s,r)=>s+r.hours,0);
+  const pendingH=reqs.filter(r=>r.emp_id===emp.id&&r.status==="pending").reduce((s,r)=>s+r.hours,0);
+  const remainH=totalH-approvedH-pendingH;
+  const hourlyUsed=reqs.filter(r=>r.emp_id===emp.id&&(r.status==="approved"||r.status==="pending")&&r.type==="hourly").reduce((s,r)=>s+r.hours,0);
+  const hourlyCapH=Math.min(HOURLY_MAX_H,totalH-approvedH-pendingH+hourlyUsed);
+  const hourlyRemH=Math.max(0,hourlyCapH-hourlyUsed);
+  return{totalH,approvedH,pendingH,remainH,hourlyUsed,hourlyCapH,hourlyRemH};
+}
+
+const inp={background:"#fff",border:"1px solid #ddd",borderRadius:6,color:"#1a1a1a",padding:"11px 14px",fontSize:15,fontFamily:"inherit",width:"100%",outline:"none"};
+const lbl={fontSize:13,color:GRAY,marginBottom:6,display:"block"};
+const row={display:"flex",alignItems:"center",gap:10,padding:"13px 0",borderBottom:"1px solid #eee"};
+
+function Logo(){return(<div style={{display:"flex",alignItems:"center",gap:8}}><div style={{background:RED,width:3,height:20,borderRadius:2}}/><div><div style={{fontSize:12,fontWeight:700,color:RED,lineHeight:1}}>株式会社ダイチトレード</div><div style={{fontSize:10,color:GRAY,letterSpacing:"0.06em"}}>DAICHI TRADE CO.,LTD.</div></div></div>);}
+function TopBar({title,onLogout}){return(<div style={{marginBottom:20}}><div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}><Logo/><button onClick={onLogout} style={{background:"none",border:"1px solid #ddd",borderRadius:6,padding:"6px 12px",fontSize:13,color:GRAY,cursor:"pointer",fontFamily:"inherit"}}>ログアウト</button></div><div style={{borderTop:"2px solid "+RED,paddingTop:12}}><div style={{fontSize:20,fontWeight:900,color:"#1a1a1a"}}>{title}</div></div></div>);}
+function PinInput({value,onChange}){return(<div style={{position:"relative"}}><div style={{display:"flex",justifyContent:"center",gap:12}}>{[0,1,2,3].map(i=>(<div key={i} style={{width:54,height:64,borderRadius:8,border:`2px solid ${value.length>i?RED:"#ddd"}`,background:"#fff",display:"flex",alignItems:"center",justifyContent:"center",fontSize:26,fontWeight:700,color:"#1a1a1a"}}>{value[i]?"●":""}</div>))}</div><input type="tel" maxLength={4} value={value} onChange={e=>{const v=e.target.value.replace(/\D/g,"");if(v.length<=4)onChange(v);}} style={{position:"absolute",opacity:0,top:0,left:0,width:"100%",height:"100%",cursor:"text"}} autoFocus/></div>);}
+function Badge({status}){const m={pending:{t:"承認待ち",bg:"#fff8e0",c:GOLD,bd:"#f0d060"},approved:{t:"承認済み",bg:"#f0faf5",c:GREEN,bd:"#90ddb0"},rejected:{t:"却下",bg:"#fff0f0",c:RED,bd:"#f0c0c0"}};const s=m[status]||m.pending;return<span style={{background:s.bg,color:s.c,border:`1px solid ${s.bd}`,borderRadius:4,padding:"3px 10px",fontSize:12,fontWeight:600,whiteSpace:"nowrap"}}>{s.t}</span>;}
+function TypeTag({type,days,hours}){if(type==="hourly")return<span style={{background:"#e8f0ff",color:"#3060c0",border:"1px solid #b0c8f0",borderRadius:4,padding:"1px 8px",fontSize:11,fontWeight:600}}>時間</span>;if(type==="half")return<span style={{background:"#f0fff4",color:GREEN,border:"1px solid #90ddb0",borderRadius:4,padding:"1px 8px",fontSize:11,fontWeight:600}}>半日</span>;if(type==="daily"){const d=days||Math.round((hours||HOURS_PER_DAY)/HOURS_PER_DAY);return<span style={{background:"#f5f0ff",color:"#6040c0",border:"1px solid #c0a8f0",borderRadius:4,padding:"1px 8px",fontSize:11,fontWeight:600}}>{d}日</span>;}return null;}
+function ProgressBar({used,pending=0,total,color}){const up=total>0?Math.min((used/total)*100,100):0,pp=total>0?Math.min((pending/total)*100,100-up):0;return(<div><div style={{display:"flex",justifyContent:"space-between",fontSize:12,color:GRAY,marginBottom:6}}><span>{hd(used)}承認済み{pending>0?<span style={{color:GOLD}}>　{hd(pending)}承認待ち</span>:null}</span><span>残 {hd(total-used-pending)}</span></div><div style={{background:"#eee",borderRadius:99,height:6,overflow:"hidden",position:"relative"}}><div style={{height:6,borderRadius:99,background:color,width:`${up}%`,position:"absolute",left:0,transition:"width 0.4s"}}/><div style={{height:6,background:GOLD,width:`${pp}%`,position:"absolute",left:`${up}%`,opacity:0.7}}/></div></div>);}
+function Alert({type,children}){const s={error:{bg:"#fff0f0",bd:"#f0c0c0",c:RED},warn:{bg:"#fff8e0",bd:"#f0d060",c:GOLD},info:{bg:"#f0f8ff",bd:"#b0d0f0",c:"#2060b0"},success:{bg:"#f0faf5",bd:"#90ddb0",c:GREEN}}[type]||{bg:"#f0f8ff",bd:"#b0d0f0",c:"#2060b0"};return<div style={{background:s.bg,border:`1px solid ${s.bd}`,borderRadius:8,padding:"10px 14px",fontSize:13,color:s.c,marginBottom:14}}>{children}</div>;}
+function Card({children,style={}}){return<div style={{background:"#fff",borderRadius:10,padding:20,boxShadow:"0 1px 4px rgba(0,0,0,0.07)",marginBottom:14,...style}}>{children}</div>;}
+function SectionTitle({children}){return<div style={{fontSize:12,fontWeight:700,color:GRAY,textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:12}}>{children}</div>;}
+function StatGrid({items}){return(<div style={{display:"grid",gridTemplateColumns:`repeat(${items.length},1fr)`,gap:10,marginBottom:14}}>{items.map(s=>(<div key={s.label} style={{background:"#fff",borderRadius:8,padding:"14px 10px",textAlign:"center",boxShadow:"0 1px 4px rgba(0,0,0,0.06)"}}><div style={{fontSize:11,color:GRAY,marginBottom:4}}>{s.label}</div><div style={{fontSize:18,fontWeight:900,color:s.color||"#1a1a1a"}}>{s.val}</div></div>))}</div>);}
+
+function EditModal({req, onSave, onCancel, maxHourly, maxRemain, isEmp}) {
+  const [date, setDate]     = useState(req.date||"");
+  const [hours, setHours]   = useState(req.hours||8);
+  const [days, setDays]     = useState(Math.max(1,Math.round(req.days||Math.round((req.hours||8)/HOURS_PER_DAY))));
+  const [halfType, setHalfType] = useState(req.half_type||req.halfType||"am");
+  const [reason, setReason] = useState(req.reason||"");
+  const [err, setErr]       = useState("");
+
+  const maxH = req.type==="hourly" ? Math.min(maxHourly, maxRemain) : maxRemain;
+
+  function handleSave() {
+    if(!date){setErr("日付を選択してください");return;}
+    if(req.type==="daily" && days*HOURS_PER_DAY > maxRemain){setErr(`残り有給が不足しています`);return;}
+    if(req.type==="hourly" && hours > maxH){setErr(`最大 ${hd(maxH)} まで申請できます`);return;}
+    onSave({date, hours: req.type==="daily"?days*HOURS_PER_DAY:hours, days, halfType, reason});
+  }
+
+  return (
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.35)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:100}}>
+      <div style={{background:"#fff",borderRadius:10,padding:20,maxWidth:360,width:"calc(100% - 32px)",boxShadow:"0 4px 20px rgba(0,0,0,0.15)"}}>
+        <div style={{fontSize:15,fontWeight:700,marginBottom:16}}>申請を修正</div>
+
+        <label style={lbl}>取得日</label>
+        <input type="date" style={{...inp,marginBottom:12}} value={date}
+          onChange={e=>setDate(e.target.value)}/>
+
+        {req.type==="hourly"&&(
+          <>
+            <label style={lbl}>時間数（最大 {hd(maxH)}）</label>
+            <select style={{...inp,marginBottom:12}} value={hours}
+              onChange={e=>setHours(Number(e.target.value))}>
+              {[1,2,3,4,5,6,7,8].filter(h=>h<=maxH).map(h=>(
+                <option key={h} value={h}>{h}時間{h===8?"（1日）":""}</option>
+              ))}
+            </select>
+          </>
+        )}
+        {req.type==="half"&&(
+          <>
+            <label style={lbl}>種別</label>
+            <select style={{...inp,marginBottom:12}} value={halfType}
+              onChange={e=>setHalfType(e.target.value)}>
+              <option value="am">午前半休（4時間）</option>
+              <option value="pm">午後半休（4時間）</option>
+            </select>
+          </>
+        )}
+        {req.type==="daily"&&(
+          <>
+            <label style={lbl}>取得日数</label>
+            <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:12}}>
+              <button onClick={()=>setDays(d=>Math.max(1,d-1))}
+                style={{width:32,height:32,borderRadius:6,border:"1px solid #ddd",background:"#fff",fontSize:18,cursor:"pointer"}}>−</button>
+              <span style={{fontSize:20,fontWeight:900,minWidth:32,textAlign:"center"}}>{days}</span>
+              <button onClick={()=>setDays(d=>d+1)}
+                style={{width:32,height:32,borderRadius:6,border:"1px solid #ddd",background:"#fff",fontSize:18,cursor:"pointer"}}>＋</button>
+              <span style={{fontSize:13,color:GRAY}}>{fmtDays(days)}</span>
+            </div>
+          </>
+        )}
+
+        <label style={lbl}>理由（任意）</label>
+        <textarea style={{...inp,resize:"none",marginBottom:12}} rows={2}
+          value={reason} onChange={e=>setReason(e.target.value)}/>
+
+        {err&&<div style={{color:"#c0181f",fontSize:13,marginBottom:10}}>{err}</div>}
+        {isEmp&&<div style={{background:"#fff8e0",border:"1px solid #f0d060",borderRadius:8,padding:"10px 14px",fontSize:13,color:"#b07800",marginBottom:12}}>⚠️ 修正後も管理者の承認が必要です。</div>}
+
+        <div style={{display:"flex",gap:8}}>
+          <button onClick={handleSave}
+            style={{flex:1,background:"#c0181f",color:"#fff",border:"none",borderRadius:6,padding:12,fontSize:14,fontWeight:700,cursor:"pointer"}}>
+            {isEmp?"修正して再申請":"保存"}
+          </button>
+          <button onClick={onCancel}
+            style={{background:"#fff",color:"#555",border:"1px solid #ddd",borderRadius:6,padding:"10px 16px",fontSize:14,cursor:"pointer"}}>
+            キャンセル
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export default function App(){
+  const [employees,setEmployees]=useState([]);
+  const [requests,setRequests]=useState([]);
+  const [aprilMode,setAprilMode]=useState(IS_APRIL_PLUS);
+  const [loading,setLoading]=useState(true);
+  const [dbError,setDbError]=useState(null);
+  const [role,setRole]=useState(null);
+  const [screen,setScreen]=useState("login");
+  const [loginMode,setLoginMode]=useState(null);
+  const [selEmp,setSelEmp]=useState(null);
+  const [pin,setPin]=useState("");
+  const [pinErr,setPinErr]=useState("");
+  const [tries,setTries]=useState({});
+  const [pinStep,setPinStep]=useState("select");
+  const [adminDetail,setAdminDetail]=useState(null);
+  const [adminSearch,setAdminSearch]=useState("");
+  const [showAddEmp,setShowAddEmp]=useState(false);
+  const [newEmp,setNewEmp]=useState({name:"",pin:"",total_days:20});
+  const [editingEmp,setEditingEmp]=useState(null);
+  const [delEmpConf,setDelEmpConf]=useState(null);
+  const [showPin,setShowPin]=useState({});
+  const [marchModal,setMarchModal]=useState(null);
+  const [marchHours,setMarchHours]=useState("");
+  const [form,setForm]=useState({date:"",hours:1,reason:"",halfType:"am",days:1});
+  const [formErr,setFormErr]=useState("");
+  const [editReq,setEditReq]=useState(null);
+  const [editReqErr,setEditReqErr]=useState("");
+  const [editReqReason,setEditReqReason]=useState("");
+  const [delReqConf,setDelReqConf]=useState(null);
+
+  const loadData=useCallback(async()=>{
+    try{
+      const[{data:emps,error:e1},{data:reqs,error:e2},{data:cfg,error:e3}]=await Promise.all([
+        supabase.from("employees").select("*").order("id"),
+        supabase.from("requests").select("*").order("id"),
+        supabase.from("config").select("*").eq("key","aprilMode").maybeSingle(),
+      ]);
+      if(e1)throw e1;if(e2)throw e2;
+      setEmployees(emps||[]);setRequests(reqs||[]);
+      if(cfg)setAprilMode(cfg.value==="true");
+    }catch(e){setDbError(e.message);}
+    setLoading(false);
+  },[]);
+
+  useEffect(()=>{loadData();},[loadData]);
+  useEffect(()=>{
+    const sub=supabase.channel("changes")
+      .on("postgres_changes",{event:"*",schema:"public",table:"employees"},loadData)
+      .on("postgres_changes",{event:"*",schema:"public",table:"requests"},loadData)
+      .on("postgres_changes",{event:"*",schema:"public",table:"config"},loadData)
+      .subscribe();
+    return()=>supabase.removeChannel(sub);
+  },[loadData]);
+
+  const approveReq=async id=>{await supabase.from("requests").update({status:"approved"}).eq("id",id);};
+  const rejectReq=async id=>{await supabase.from("requests").update({status:"rejected"}).eq("id",id);};
+  const addReq=async r=>{await supabase.from("requests").insert([r]);};
+  const updateReq=async(id,d)=>{
+    if(d.days) d.days=Math.max(1,Math.round(d.days));
+    const {error}=await supabase.from("requests").update(d).eq("id",id);
+    if(error){alert("保存エラー: "+error.message);throw error;}
+  };
+  const deleteReq=async id=>{await supabase.from("requests").delete().eq("id",id);};
+  const updateEmp=async(id,d)=>{await supabase.from("employees").update(d).eq("id",id);};
+  const addEmp=async e=>{await supabase.from("employees").insert([e]);};
+  const deleteEmp=async id=>{await supabase.from("employees").delete().eq("id",id);await supabase.from("requests").delete().eq("emp_id",id);};
+  const toggleApril=async()=>{const n=!aprilMode;await supabase.from("config").upsert({key:"aprilMode",value:String(n)},{onConflict:"key"});setAprilMode(n);};
+
+  const locked=id=>isLocked(tries,id);
+  const pendingCnt=()=>requests.filter(r=>r.status==="pending").length;
+  const empReqs=id=>requests.filter(r=>r.emp_id===id);
+
+  function logout(){setRole(null);setScreen("login");setLoginMode(null);setPin("");setPinErr("");setSelEmp(null);setPinStep("select");setAdminDetail(null);setAdminSearch("");}
+  function tryLogin(){
+    if(locked(selEmp.id)){setPinErr("アカウントがロックされています。管理者にご連絡ください。");return;}
+    if(pin===selEmp.pin){setTries(p=>({...p,[selEmp.id]:0}));setRole(selEmp.id);setScreen("emp_home");}
+    else{const n=(tries[selEmp.id]||0)+1;setTries(p=>({...p,[selEmp.id]:n}));setPinErr(n>=MAX_TRIES?"アカウントがロックされました。管理者にご連絡ください。":`PINが正しくありません（残り${MAX_TRIES-n}回）`);setPin("");}
+  }
+
+  if(loading)return(<div style={{minHeight:"100vh",background:LIGHT,display:"flex",alignItems:"center",justifyContent:"center",flexDirection:"column",gap:16,fontFamily:"'Noto Sans JP',sans-serif"}}><style>{CSS}</style><Logo/><div style={{fontSize:14,color:GRAY}}>データを読み込んでいます...</div><div style={{width:200,height:4,background:"#eee",borderRadius:99,overflow:"hidden"}}><div style={{height:4,background:RED,borderRadius:99,animation:"loading 1.2s ease-in-out infinite"}}/></div></div>);
+  if(dbError)return(<div style={{minHeight:"100vh",background:LIGHT,display:"flex",alignItems:"center",justifyContent:"center",flexDirection:"column",gap:16,padding:24,fontFamily:"'Noto Sans JP',sans-serif",textAlign:"center"}}><style>{CSS}</style><div style={{fontSize:28}}>⚠️</div><div style={{fontSize:15,fontWeight:700,color:RED}}>Supabase接続エラー</div><div style={{fontSize:13,color:GRAY,maxWidth:320}}>{dbError}</div><div style={{fontSize:12,background:"#f5f5f5",padding:"12px 16px",borderRadius:8,maxWidth:320,color:GRAY}}>.envのVITE_SUPABASE_URLとVITE_SUPABASE_ANON_KEYを確認してください</div><button className="primaryBtn" style={{maxWidth:200}} onClick={loadData}>再試行</button></div>);
+
+  // ── LOGIN ─────────────────────────────────────────────────
+  if(screen==="login")return(<div style={{minHeight:"100vh",background:LIGHT,fontFamily:"'Noto Sans JP','Hiragino Sans',sans-serif",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:24}}><style>{CSS}</style><div style={{width:"100%",maxWidth:400}}><div style={{textAlign:"center",marginBottom:32}}><Logo/><div style={{margin:"16px auto",width:36,height:3,background:RED,borderRadius:2}}/><div style={{fontSize:18,fontWeight:900,color:"#1a1a1a"}}>有給休暇管理システム</div></div>{!loginMode&&(<div style={{display:"grid",gap:12}}><button className="roleBtn" onClick={()=>setLoginMode("admin")}><div style={{fontSize:26,marginBottom:8}}>🔐</div><div style={{fontSize:16,fontWeight:700}}>管理者</div><div style={{fontSize:12,color:GRAY,marginTop:4}}>PINコードでログイン</div></button><button className="roleBtn" onClick={()=>{setLoginMode("emp");setPinStep("select");}}><div style={{fontSize:26,marginBottom:8}}>👤</div><div style={{fontSize:16,fontWeight:700}}>従業員</div><div style={{fontSize:12,color:GRAY,marginTop:4}}>名前＋PINでログイン</div></button></div>)}{loginMode==="admin"&&(<Card><button className="backBtn" onClick={()=>{setLoginMode(null);setPin("");setPinErr("");}}>← 戻る</button><div style={{fontSize:15,fontWeight:700,textAlign:"center",marginBottom:20}}>管理者PINを入力</div><PinInput value={pin} onChange={v=>{setPin(v);setPinErr("");}}/>{pinErr&&<div style={{color:RED,fontSize:13,textAlign:"center",marginTop:10}}>{pinErr}</div>}<button className="primaryBtn" style={{marginTop:20}} disabled={pin.length<4} onClick={()=>{if(pin===ADMIN_PIN){setRole("admin");setScreen("admin_list");}else{setPinErr("PINが正しくありません");setPin("");}}}>ログイン</button></Card>)}{loginMode==="emp"&&pinStep==="select"&&(<Card><button className="backBtn" onClick={()=>setLoginMode(null)}>← 戻る</button><div style={{fontSize:15,fontWeight:700,textAlign:"center",marginBottom:14}}>名前を選択</div><div style={{maxHeight:320,overflowY:"auto",display:"grid",gap:8}}>{employees.map(e=>(<button key={e.id} className={`empSelBtn${selEmp?.id===e.id?" sel":""}`} onClick={()=>setSelEmp(e)}><div style={{width:34,height:34,borderRadius:"50%",background:eColor(e.id),color:"#fff",display:"flex",alignItems:"center",justifyContent:"center",fontWeight:700,fontSize:14,flexShrink:0}}>{ini(e.name)}</div><span style={{fontSize:14}}>{e.name}</span>{locked(e.id)&&<span style={{marginLeft:"auto",fontSize:11,color:RED}}>🔒</span>}</button>))}</div><button className="primaryBtn" style={{marginTop:14}} disabled={!selEmp} onClick={()=>{setPin("");setPinErr("");setPinStep("pin");}}>次へ</button></Card>)}{loginMode==="emp"&&pinStep==="pin"&&selEmp&&(<Card><button className="backBtn" onClick={()=>{setPinStep("select");setPin("");setPinErr("");}}>← 戻る</button><div style={{display:"flex",alignItems:"center",gap:10,justifyContent:"center",marginBottom:20}}><div style={{width:40,height:40,borderRadius:"50%",background:eColor(selEmp.id),color:"#fff",display:"flex",alignItems:"center",justifyContent:"center",fontWeight:700,fontSize:16}}>{ini(selEmp.name)}</div><span style={{fontSize:16,fontWeight:700}}>{selEmp.name}</span></div><div style={{fontSize:15,fontWeight:700,textAlign:"center",marginBottom:20}}>PINコードを入力</div>{locked(selEmp.id)?<Alert type="error">🔒 アカウントがロックされています。管理者にご連絡ください。</Alert>:<><PinInput value={pin} onChange={v=>{setPin(v);setPinErr("");}}/>{pinErr&&<div style={{color:RED,fontSize:13,textAlign:"center",marginTop:10}}>{pinErr}</div>}<button className="primaryBtn" style={{marginTop:20}} disabled={pin.length<4} onClick={tryLogin}>ログイン</button></>}</Card>)}</div></div>);
+
+  // ── ADMIN LIST ────────────────────────────────────────────
+  if(screen==="admin_list"){
+    const filtered=employees.filter(e=>e.name.includes(adminSearch));
+    const pCnt=pendingCnt();
+    return(<div style={{minHeight:"100vh",background:LIGHT,fontFamily:"'Noto Sans JP','Hiragino Sans',sans-serif",padding:"24px 16px 60px",maxWidth:520,margin:"0 auto"}}><style>{CSS}</style>
+      <TopBar title="管理者ダッシュボード" onLogout={logout}/>
+      <Card><div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}><div><div style={{fontSize:14,fontWeight:700}}>{aprilMode?"🌸 4月以降モード（時間単位 有効）":"📋 3月集計中モード"}</div><div style={{fontSize:12,color:GRAY,marginTop:2}}>{aprilMode?`残日数内 最大${HOURLY_MAX_DAYS}日を時間単位で申請可`:"4月から時間単位申請が解放されます"}</div></div><button className={aprilMode?"approveBtn":"secBtn"} onClick={toggleApril}>{aprilMode?"✓ 4月モード":"4月へ切替"}</button></div></Card>
+      <StatGrid items={[{label:"従業員数",val:`${employees.length}名`},{label:"承認待ち",val:`${pCnt}件`,color:pCnt>0?GOLD:"#1a1a1a"},{label:"ロック中",val:`${employees.filter(e=>locked(e.id)).length}名`,color:employees.some(e=>locked(e.id))?RED:"#1a1a1a"}]}/>
+      {pCnt>0&&(<Card><SectionTitle>⏳ 承認待ち（{pCnt}件）</SectionTitle>{requests.filter(r=>r.status==="pending").map(r=>{const emp=employees.find(e=>e.id===r.emp_id);return(<div key={r.id} style={row}><div style={{width:32,height:32,borderRadius:"50%",background:eColor(r.emp_id),color:"#fff",display:"flex",alignItems:"center",justifyContent:"center",fontWeight:700,fontSize:13,flexShrink:0}}>{ini(emp?.name)}</div><div style={{flex:1,minWidth:0}}><div style={{fontSize:13,fontWeight:600}}>{emp?.name}</div><div style={{fontSize:11,color:GRAY}}>{r.date}　{hd(r.hours)}{r.reason?`　${r.reason}`:""}</div></div><div style={{display:"flex",gap:6}}><button className="approveBtn" onClick={()=>approveReq(r.id)}>承認</button><button className="rejectBtn" onClick={()=>rejectReq(r.id)}>却下</button></div></div>);})}</Card>)}
+      <div style={{display:"flex",gap:10,marginBottom:14}}><input style={{...inp,flex:1}} placeholder="🔍 名前で検索..." value={adminSearch} onChange={e=>setAdminSearch(e.target.value)}/><button className="primaryBtn" style={{width:"auto",padding:"0 16px",whiteSpace:"nowrap"}} onClick={()=>setShowAddEmp(true)}>＋ 追加</button></div>
+      {filtered.map((emp,i)=>{const{approvedH,pendingH,remainH,totalH,hourlyRemH}=calcStats(emp,requests);const pct=totalH>0?(approvedH/totalH)*100:0;const pEmp=requests.filter(r=>r.emp_id===emp.id&&r.status==="pending").length;return(<div key={emp.id} className="empRow" style={{animationDelay:`${i*0.02}s`}} onClick={()=>{setAdminDetail(emp);setScreen("admin_detail");}}><div style={{width:38,height:38,borderRadius:"50%",background:eColor(emp.id),color:"#fff",display:"flex",alignItems:"center",justifyContent:"center",fontWeight:700,fontSize:15,flexShrink:0,opacity:locked(emp.id)?0.4:1}}>{ini(emp.name)}</div><div style={{flex:1,minWidth:0}}><div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:5}}><span style={{fontWeight:700,fontSize:14}}>{emp.name}{pEmp>0&&<span style={{marginLeft:6,background:"#fff8e0",color:GOLD,border:"1px solid #f0d060",borderRadius:4,padding:"1px 7px",fontSize:11}}>申請{pEmp}</span>}{locked(emp.id)&&<span style={{marginLeft:6,background:"#fff0f0",color:RED,border:"1px solid #f0c0c0",borderRadius:4,padding:"1px 7px",fontSize:11}}>🔒</span>}</span><span style={{fontSize:12,fontWeight:700,color:remainH<=8?RED:GRAY}}>残 {hd(remainH)}</span></div><div style={{background:"#eee",borderRadius:99,height:4,overflow:"hidden"}}><div style={{height:4,borderRadius:99,background:eColor(emp.id),width:`${pct}%`,transition:"width 0.4s"}}/></div><div style={{fontSize:11,color:GRAY,marginTop:3}}>{hd(approvedH)}使用 / {fmtDays(emp.total_days)}付与{aprilMode?`　時間枠 残${hd(hourlyRemH)}`:""}</div></div></div>);})}
+      {showAddEmp&&(<div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.35)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:100}}><Card style={{maxWidth:360,width:"calc(100% - 32px)",margin:0}}><div style={{fontSize:15,fontWeight:700,marginBottom:16}}>従業員を追加</div><label style={lbl}>氏名</label><input style={{...inp,marginBottom:12}} placeholder="例：山田 太郎" value={newEmp.name} onChange={e=>setNewEmp(p=>({...p,name:e.target.value}))} autoFocus/><label style={lbl}>PINコード（4桁）</label><input style={{...inp,marginBottom:12}} type="tel" maxLength={4} placeholder="0000" value={newEmp.pin} onChange={e=>setNewEmp(p=>({...p,pin:e.target.value.replace(/\D/g,"").slice(0,4)}))}/><label style={lbl}>付与日数</label><input style={{...inp,marginBottom:16}} type="number" min={0} step={0.5} value={newEmp.total_days} onChange={e=>setNewEmp(p=>({...p,total_days:parseFloat(e.target.value)||0}))}/><div style={{display:"flex",gap:8}}><button className="primaryBtn" style={{flex:1}} disabled={!newEmp.name.trim()||newEmp.pin.length<4} onClick={async()=>{await addEmp({name:newEmp.name.trim(),pin:newEmp.pin,total_days:newEmp.total_days});setNewEmp({name:"",pin:"",total_days:20});setShowAddEmp(false);}}>追加</button><button className="secBtn" onClick={()=>{setShowAddEmp(false);setNewEmp({name:"",pin:"",total_days:20});}}>キャンセル</button></div></Card></div>)}
+    </div>);
+  }
+
+  // ── ADMIN DETAIL ──────────────────────────────────────────
+  if(screen==="admin_detail"&&adminDetail){
+    const emp=employees.find(e=>e.id===adminDetail.id)||adminDetail;
+    const{totalH,approvedH,pendingH,remainH,hourlyUsed,hourlyCapH,hourlyRemH}=calcStats(emp,requests);
+    const pct=totalH>0?Math.min((approvedH/totalH)*100,100):0;
+    const reqs=empReqs(emp.id).sort((a,b)=>b.id-a.id);
+    const pinVisible=showPin[emp.id];
+    const marchDone=reqs.some(r=>r.reason==="3月取得実績");
+    return(<div style={{minHeight:"100vh",background:LIGHT,fontFamily:"'Noto Sans JP','Hiragino Sans',sans-serif",padding:"24px 16px 60px",maxWidth:520,margin:"0 auto"}}><style>{CSS}</style>
+      <button className="backBtn" onClick={()=>{setScreen("admin_list");setAdminDetail(null);setDelEmpConf(null);setEditingEmp(null);setShowPin({});}}>← 一覧に戻る</button>
+      <Card><div style={{display:"flex",alignItems:"center",gap:14}}><div style={{width:48,height:48,borderRadius:"50%",background:eColor(emp.id),color:"#fff",display:"flex",alignItems:"center",justifyContent:"center",fontWeight:700,fontSize:20,flexShrink:0,opacity:locked(emp.id)?0.4:1}}>{ini(emp.name)}</div><div style={{flex:1}}><div style={{fontSize:18,fontWeight:900}}>{emp.name}</div>{locked(emp.id)&&<div style={{fontSize:12,color:RED,marginTop:2}}>🔒 アカウントロック中</div>}</div><div style={{display:"flex",gap:6}}>{locked(emp.id)&&<button className="approveBtn" onClick={()=>setTries(p=>({...p,[emp.id]:0}))}>解除</button>}<button className="secBtn" style={{fontSize:12,padding:"6px 12px"}} onClick={()=>setEditingEmp({...emp})}>✎ 編集</button></div></div>
+        {editingEmp?.id===emp.id&&(<div style={{marginTop:16,paddingTop:16,borderTop:"1px solid #eee"}}><label style={lbl}>氏名</label><input style={{...inp,marginBottom:10}} value={editingEmp.name} onChange={e=>setEditingEmp(p=>({...p,name:e.target.value}))}/><label style={lbl}>PINコード</label><input style={{...inp,marginBottom:10}} type="tel" maxLength={4} value={editingEmp.pin} onChange={e=>setEditingEmp(p=>({...p,pin:e.target.value.replace(/\D/g,"").slice(0,4)}))}/><label style={lbl}>付与日数</label><input style={{...inp,marginBottom:14}} type="number" min={0} step={0.5} value={editingEmp.total_days} onChange={e=>setEditingEmp(p=>({...p,total_days:parseFloat(e.target.value)||0}))}/><div style={{display:"flex",gap:8}}><button className="primaryBtn" style={{flex:1}} disabled={!editingEmp.name.trim()||editingEmp.pin.length<4} onClick={async()=>{await updateEmp(emp.id,{name:editingEmp.name.trim(),pin:editingEmp.pin,total_days:editingEmp.total_days});setEditingEmp(null);}}>保存</button><button className="secBtn" onClick={()=>setEditingEmp(null)}>キャンセル</button></div></div>)}
+      </Card>
+      <Card><div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}><div><div style={{fontSize:12,color:GRAY,marginBottom:4}}>PINコード</div><div style={{fontSize:22,fontWeight:900,letterSpacing:"0.3em"}}>{pinVisible?emp.pin:"••••"}</div></div><button className="secBtn" onClick={()=>setShowPin(p=>({...p,[emp.id]:!p[emp.id]}))}>{pinVisible?"隠す":"表示"}</button></div></Card>
+      <StatGrid items={[{label:"付与合計",val:fmtDays(emp.total_days),color:GRAY},{label:"使用済み",val:hd(approvedH)+(pendingH>0?` (+${hd(pendingH)}待)`:""),color:"#999"},{label:"残り",val:hd(remainH),color:remainH<=8?RED:"#1a1a1a"}]}/>
+      <Card><ProgressBar used={approvedH} pending={pendingH} total={totalH} color={eColor(emp.id)}/></Card>
+      {aprilMode&&(<Card style={{border:`1px solid ${hourlyRemH<=0?"#f0c0c0":hourlyRemH<=8?"#f0d060":"#eee"}`}}><SectionTitle>時間単位取得枠（最大{HOURLY_MAX_DAYS}日）</SectionTitle><div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}><div style={{fontSize:20,fontWeight:900,color:hourlyRemH<=0?RED:hourlyRemH<=8?GOLD:eColor(emp.id)}}>残 {hd(hourlyRemH)}<span style={{fontSize:13,color:GRAY,fontWeight:400}}> / {hd(hourlyCapH)}</span></div><div style={{fontSize:13,color:GRAY}}>使用 {hd(hourlyUsed)}</div></div><div style={{background:"#eee",borderRadius:99,height:5,overflow:"hidden"}}><div style={{height:5,borderRadius:99,background:hourlyRemH<=0?RED:hourlyRemH<=8?GOLD:eColor(emp.id),width:`${hourlyCapH>0?(hourlyUsed/hourlyCapH)*100:0}%`,transition:"width 0.5s"}}/></div>{hourlyRemH<=0&&<div style={{fontSize:12,color:RED,marginTop:8,fontWeight:600}}>🚫 時間単位枠を使い切りました</div>}</Card>)}
+      {!aprilMode&&(<button className={marchDone?"secBtn":"primaryBtn"} style={{width:"100%",marginBottom:14}} onClick={()=>{setMarchModal(emp.id);setMarchHours("");}}>{marchDone?"📋 3月実績を修正":"📋 3月取得実績を入力"}</button>)}
+      {marchModal===emp.id&&(<div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.35)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:100}}><Card style={{maxWidth:340,width:"calc(100% - 32px)",margin:0}}><div style={{fontSize:15,fontWeight:700,marginBottom:4}}>3月取得実績を入力</div><div style={{fontSize:12,color:GRAY,marginBottom:14}}>{emp.name}</div><label style={lbl}>取得時間数（例：8=1日、4=0.5日）</label><input style={{...inp,marginBottom:14}} type="number" min={0.5} step={0.5} placeholder="0" value={marchHours} onChange={e=>setMarchHours(e.target.value)} autoFocus/><div style={{display:"flex",gap:8}}><button className="primaryBtn" style={{flex:1}} disabled={!marchHours||parseFloat(marchHours)<=0} onClick={async()=>{const h=parseFloat(marchHours);const ex=reqs.find(r=>r.reason==="3月取得実績");if(ex)await deleteReq(ex.id);await addReq({emp_id:emp.id,date:"2026-03-31",hours:h,reason:"3月取得実績",status:"approved",is_initial:true,type:"daily"});setMarchModal(null);setMarchHours("");}}>登録</button><button className="secBtn" onClick={()=>{setMarchModal(null);setMarchHours("");}}>キャンセル</button></div></Card></div>)}
+      <Card><SectionTitle>申請・実績履歴</SectionTitle>{reqs.length===0?<div style={{textAlign:"center",padding:"24px 0",color:GRAY,fontSize:13}}>履歴なし</div>:reqs.map(r=>(<div key={r.id} style={{...row,flexWrap:"wrap",gap:8}}><div style={{flex:1,minWidth:160}}><div style={{display:"flex",alignItems:"center",gap:6,marginBottom:2}}><span style={{fontSize:13,fontWeight:700}}>{r.date}{r.type==="daily"&&(r.days||1)>1?` 〜 ${addDays(r.date,(r.days||1)-1)}`:""}{r.type==="half"?` ${r.half_type==="am"?"午前":"午後"}半休`:""} {hd(r.hours)}</span><TypeTag type={r.type} days={r.days} hours={r.hours}/></div>{r.reason&&<div style={{fontSize:11,color:GRAY}}>{r.reason}</div>}</div><Badge status={r.status}/>{r.status==="pending"&&(<div style={{display:"flex",gap:6}}><button className="approveBtn" onClick={()=>approveReq(r.id)}>承認</button><button className="rejectBtn" onClick={()=>rejectReq(r.id)}>却下</button></div>)}{!r.is_initial&&(delReqConf===r.id?<div style={{display:"flex",gap:6,width:"100%"}}><button className="dangerBtn" style={{flex:1}} onClick={()=>{deleteReq(r.id);setDelReqConf(null);}}>削除確定</button><button className="secBtn" onClick={()=>setDelReqConf(null)}>戻る</button></div>:<div style={{display:"flex",gap:6}}><button className="secBtn" style={{fontSize:12,padding:"4px 10px"}} onClick={()=>{setEditReq({...r,days:r.days||(r.hours/HOURS_PER_DAY),halfType:r.half_type||"am"});setEditReqReason(r.reason||"");setEditReqErr("");}}>✎ 修正</button><button className="dangerBtn" style={{fontSize:12,padding:"4px 10px"}} onClick={()=>setDelReqConf(r.id)}>削除</button></div>)}</div>))}</Card>
+      {delEmpConf===emp.id?<Card style={{border:"1px solid #f0c0c0",textAlign:"center"}}><div style={{fontSize:14,marginBottom:14,color:RED}}>⚠️ {emp.name} を削除しますか？</div><div style={{display:"flex",gap:8,justifyContent:"center"}}><button className="dangerBtn" onClick={()=>{deleteEmp(emp.id);setScreen("admin_list");setDelEmpConf(null);}}>削除確定</button><button className="secBtn" onClick={()=>setDelEmpConf(null)}>キャンセル</button></div></Card>:<button className="dangerBtn" style={{width:"100%"}} onClick={()=>setDelEmpConf(emp.id)}>この従業員を削除</button>}
+      {editReq&&<EditModal req={editReq} maxHourly={hourlyRemH+(requests.find(r=>r.id===editReq.id)?.hours||0)} maxRemain={remainH+(requests.find(r=>r.id===editReq.id)?.hours||0)} isEmp={false} onCancel={()=>setEditReq(null)} onSave={async(v)=>{await updateReq(editReq.id,{date:v.date,hours:v.hours,days:v.days,half_type:v.halfType,reason:v.reason});setEditReq(null);}}/>}
+    </div>);
+  }
+
+  // ── EMPLOYEE ──────────────────────────────────────────────
+  const curEmp=employees.find(e=>e.id===role);
+  if(!curEmp){logout();return null;}
+  const{totalH,approvedH,pendingH,remainH,hourlyUsed,hourlyCapH,hourlyRemH}=calcStats(curEmp,requests);
+  const myReqs=empReqs(curEmp.id).sort((a,b)=>b.id-a.id);
+  const myPend=myReqs.filter(r=>r.status==="pending").length;
+  const pct=totalH>0?Math.min((approvedH/totalH)*100,100):0;
+  const ER=({children})=>(<div style={{minHeight:"100vh",background:LIGHT,fontFamily:"'Noto Sans JP','Hiragino Sans',sans-serif",padding:"24px 16px 60px",maxWidth:520,margin:"0 auto"}}><style>{CSS}</style>{children}</div>);
+
+  if(screen==="emp_home")return(<ER><TopBar title={curEmp.name} onLogout={logout}/>{!aprilMode&&<Alert type="warn">📋 3月分は集計中です。4月から時間単位で申請できます。</Alert>}{myPend>0&&<Alert type="warn">⏳ {myPend}件の申請が承認待ちです</Alert>}<Card><div style={{textAlign:"center",marginBottom:16}}><div style={{fontSize:12,color:GRAY,marginBottom:4}}>有給残日数</div><div style={{fontSize:44,fontWeight:900,color:remainH<=8?RED:eColor(curEmp.id)}}>{hd(remainH)}</div><div style={{fontSize:12,color:GRAY,marginTop:4}}>{hd(approvedH)}使用済み{pendingH>0?<span style={{color:GOLD}}>　承認待ち{hd(pendingH)}</span>:null} / {fmtDays(curEmp.total_days)}付与</div></div><ProgressBar used={approvedH} pending={pendingH} total={totalH} color={eColor(curEmp.id)}/></Card>{aprilMode&&(<Card style={{border:`1px solid ${hourlyRemH<=0?"#f0c0c0":hourlyRemH<=8?"#f0d060":"#e0e0e0"}`}}><div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}><div><div style={{fontSize:12,color:GRAY,marginBottom:2}}>時間単位取得枠（最大{HOURLY_MAX_DAYS}日）</div><div style={{fontSize:20,fontWeight:900,color:hourlyRemH<=0?RED:hourlyRemH<=8?GOLD:eColor(curEmp.id)}}>残 {hd(hourlyRemH)}<span style={{fontSize:13,color:GRAY,fontWeight:400}}> / {hd(hourlyCapH)}</span></div></div><div style={{textAlign:"right"}}><div style={{fontSize:11,color:GRAY}}>使用済み</div><div style={{fontSize:15,fontWeight:700,color:GRAY}}>{hd(hourlyUsed)}</div></div></div><div style={{background:"#eee",borderRadius:99,height:5,overflow:"hidden"}}><div style={{height:5,borderRadius:99,background:hourlyRemH<=0?RED:hourlyRemH<=8?GOLD:eColor(curEmp.id),width:`${hourlyCapH>0?(hourlyUsed/hourlyCapH)*100:0}%`,transition:"width 0.5s"}}/></div>{hourlyRemH<=0&&<div style={{fontSize:12,color:RED,marginTop:8,fontWeight:600}}>🚫 時間単位枠を使い切りました。残りは日・半日単位で申請してください。</div>}{hourlyRemH>0&&hourlyRemH<=8&&<div style={{fontSize:12,color:GOLD,marginTop:8,fontWeight:600}}>⚠️ 時間単位の残り枠が {hd(hourlyRemH)} になりました。</div>}</Card>)}<div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:10}}><button className="menuBtn" onClick={()=>{setForm(p=>({...p,hours:1}));setScreen("emp_apply_hourly");}} disabled={!aprilMode}><div style={{fontSize:24,marginBottom:6}}>⏱️</div><div style={{fontWeight:700,fontSize:14}}>時間単位で申請</div>{aprilMode?<div style={{fontSize:11,color:hourlyRemH<=0?RED:hourlyRemH<=8?GOLD:GRAY,marginTop:4}}>残枠 {hd(hourlyRemH)}</div>:<div style={{fontSize:11,color:GRAY,marginTop:4}}>4月から申請可能</div>}</button><button className="menuBtn" onClick={()=>setScreen("emp_apply_half")}><div style={{fontSize:24,marginBottom:6}}>🌓</div><div style={{fontWeight:700,fontSize:14}}>半日で申請</div><div style={{fontSize:11,color:GRAY,marginTop:4}}>0.5日（4時間）</div></button></div><div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:10}}><button className="menuBtn" onClick={()=>setScreen("emp_apply_daily")} disabled={remainH<HOURS_PER_DAY}><div style={{fontSize:24,marginBottom:6}}>📅</div><div style={{fontWeight:700,fontSize:14}}>1日単位で申請</div><div style={{fontSize:11,color:remainH<HOURS_PER_DAY?RED:GRAY,marginTop:4}}>{remainH<HOURS_PER_DAY?`残${hd(remainH)}のため申請不可`:"連続取得も可"}</div></button><button className="menuBtn" onClick={()=>setScreen("emp_history")}><div style={{fontSize:24,marginBottom:6}}>📋</div><div style={{fontWeight:700,fontSize:14}}>申請履歴</div>{myPend>0&&<div style={{fontSize:11,color:GOLD,marginTop:4}}>承認待ち{myPend}件</div>}</button></div></ER>);
+
+  if(screen==="emp_apply_hourly")return(<ER><button className="backBtn" onClick={()=>{setScreen("emp_home");setFormErr("");}}>← 戻る</button><div style={{fontSize:20,fontWeight:900,marginBottom:16}}>有給申請（時間単位）</div>{hourlyRemH<=0?<Alert type="error">🚫 時間単位の取得枠（{HOURLY_MAX_DAYS}日）を使い切りました。</Alert>:<Card style={{border:`1px solid ${hourlyRemH<=8?"#f0d060":"#e0e0e0"}`}}><div style={{fontSize:12,color:GRAY,marginBottom:4}}>時間単位取得 残り枠</div><div style={{fontSize:24,fontWeight:900,color:hourlyRemH<=8?GOLD:eColor(curEmp.id)}}>{hd(hourlyRemH)}</div>{hourlyRemH<=8&&<div style={{fontSize:12,color:GOLD,marginTop:4,fontWeight:600}}>⚠️ 残り枠わずかです</div>}</Card>}<Card><label style={lbl}>取得日 *</label><input type="date" style={{...inp,marginBottom:12}} value={form.date} onChange={e=>{const v=e.target.value;setForm(p=>({...p,date:v}))}} disabled={hourlyRemH<=0}/><label style={lbl}>取得時間数（残り枠 {hd(hourlyRemH)}）</label><select style={{...inp,marginBottom:12}} value={form.hours} onChange={e=>{const v=Number(e.target.value);setForm(p=>({...p,hours:v}))}} disabled={hourlyRemH<=0}>{[1,2,3,4,5,6,7,8].filter(h=>h<=Math.min(hourlyRemH,remainH)).map(h=>(<option key={h} value={h}>{h}時間{h===8?"（1日）":""}</option>))}</select><label style={lbl}>理由（任意）</label><textarea rows={3} id="reason-hourly" placeholder="私用、通院など..." disabled={hourlyRemH<=0}/>{formErr&&<Alert type="error">{formErr}</Alert>}<Alert type="info">申請後、管理者の承認が必要です。</Alert><button className="primaryBtn" disabled={hourlyRemH<=0||Math.min(hourlyRemH,remainH)<=0} onClick={async()=>{setFormErr("");if(!form.date){setFormErr("日付を選択してください");return;}const maxH=Math.min(hourlyRemH,remainH);if(form.hours>maxH){setFormErr(`申請できる上限は ${hd(maxH)} です`);return;}const reasonH=document.getElementById('reason-hourly')?.value||'';await addReq({emp_id:curEmp.id,date:form.date,hours:form.hours,reason:reasonH,status:"pending",type:"hourly"});setForm({date:"",hours:1,reason:"",halfType:"am",days:1});setScreen("emp_history");}}>申請する</button></Card></ER>);
+
+  if(screen==="emp_apply_half")return(<ER><button className="backBtn" onClick={()=>{setScreen("emp_home");setFormErr("");}}>← 戻る</button><div style={{fontSize:20,fontWeight:900,marginBottom:16}}>有給申請（半日）</div><Alert type="success">🌓 半日取得（4時間 / 0.5日）— 時間単位枠とは別に残日数から消化されます</Alert><Card style={{marginBottom:14,display:"flex",justifyContent:"space-between",alignItems:"center"}}><span style={{fontSize:13,color:GRAY}}>現在の残り有給</span><span style={{fontSize:18,fontWeight:900,color:eColor(curEmp.id)}}>{hd(remainH)}</span></Card><Card><label style={lbl}>取得日 *</label><input type="date" style={{...inp,marginBottom:12}} value={form.date} onChange={e=>{const v=e.target.value;setForm(p=>({...p,date:v}))}}/><label style={lbl}>午前 / 午後</label><select style={{...inp,marginBottom:12}} value={form.halfType||"am"} onChange={e=>{const v=e.target.value;setForm(p=>({...p,halfType:v}))}}><option value="am">午前半休（4時間）</option><option value="pm">午後半休（4時間）</option></select><label style={lbl}>理由（任意）</label><textarea rows={3} id="reason-half" placeholder="私用、通院など..."/>{formErr&&<Alert type="error">{formErr}</Alert>}<Alert type="info">申請後、管理者の承認が必要です。</Alert><button className="primaryBtn" disabled={remainH<4} onClick={async()=>{setFormErr("");if(!form.date){setFormErr("日付を選択してください");return;}if(remainH<4){setFormErr("残り有給が不足しています");return;}const reasonHalf=document.getElementById('reason-half')?.value||'';await addReq({emp_id:curEmp.id,date:form.date,hours:4,half_type:form.halfType||"am",reason:reasonHalf,status:"pending",type:"half"});setForm({date:"",hours:4,reason:"",halfType:"am",days:1});setScreen("emp_history");}}>申請する</button></Card></ER>);
+
+  if(screen==="emp_apply_daily")return(<ER><button className="backBtn" onClick={()=>{setScreen("emp_home");setFormErr("");}}>← 戻る</button><div style={{fontSize:20,fontWeight:900,marginBottom:16}}>有給申請（1日単位）</div><Card style={{marginBottom:14,display:"flex",justifyContent:"space-between",alignItems:"center"}}><span style={{fontSize:13,color:GRAY}}>現在の残り有給</span><span style={{fontSize:18,fontWeight:900,color:eColor(curEmp.id)}}>{hd(remainH)}</span></Card><Card><label style={lbl}>取得開始日 *</label><input type="date" style={{...inp,marginBottom:12}} value={form.date} onChange={e=>{const s=e.target.value;setForm(p=>({...p,date:s,dateEnd:p.days>1?addDays(s,p.days-1):""}));}}/><label style={lbl}>取得日数 *</label><div style={{display:"flex",alignItems:"center",gap:12,marginBottom:4}}><button onClick={()=>setForm(p=>{const d=Math.max(1,p.days-1);return{...p,days:d,dateEnd:d>1&&p.date?addDays(p.date,d-1):""};})} style={{width:36,height:36,borderRadius:6,border:"1px solid #ddd",background:"#fff",fontSize:20,cursor:"pointer"}}>−</button><span style={{fontSize:24,fontWeight:900,minWidth:40,textAlign:"center"}}>{form.days||1}</span><button onClick={()=>setForm(p=>{const d=(p.days||1)+1;return{...p,days:d,dateEnd:p.date?addDays(p.date,d-1):""};})} style={{width:36,height:36,borderRadius:6,border:"1px solid #ddd",background:"#fff",fontSize:20,cursor:"pointer"}}>＋</button><span style={{fontSize:13,color:GRAY}}>{fmtDays(form.days||1)}（{(form.days||1)*HOURS_PER_DAY}時間）</span></div>{(form.days||1)>1&&form.date&&(<div style={{fontSize:12,color:GRAY,marginBottom:12,paddingLeft:4}}>{form.date} 〜 {addDays(form.date,(form.days||1)-1)}</div>)}{(form.days||1)*HOURS_PER_DAY>remainH&&(<Alert type="error">残り有給（{hd(remainH)}）を超えています。最大 {remainH>=HOURS_PER_DAY?fmtDays(Math.floor(remainH/HOURS_PER_DAY)):hd(remainH)} まで申請可能です。</Alert>)}<label style={{...lbl,marginTop:4}}>理由（任意）</label><textarea rows={3} id="reason-daily" placeholder="旅行、私用、通院など..."/>{formErr&&<Alert type="error">{formErr}</Alert>}<Alert type="info">申請後、管理者の承認が必要です。</Alert><button className="primaryBtn" disabled={!form.date||(form.days||1)*HOURS_PER_DAY>remainH} onClick={async()=>{setFormErr("");const days=form.days||1;if(!form.date){setFormErr("取得開始日を選択してください");return;}if(days*HOURS_PER_DAY>remainH){setFormErr(`残り有給が不足しています（残 ${hd(remainH)}）`);return;}const reasonD=document.getElementById('reason-daily')?.value||'';await addReq({emp_id:curEmp.id,date:form.date,date_end:days>1?addDays(form.date,days-1):form.date,hours:days*HOURS_PER_DAY,days,reason:reasonD,status:"pending",type:"daily"});setForm({date:"",dateEnd:"",days:1,reason:"",halfType:"am"});setScreen("emp_history");}}>申請する</button></Card></ER>);
+
+  if(screen==="emp_history")return(<ER><button className="backBtn" onClick={()=>setScreen("emp_home")}>← 戻る</button><div style={{fontSize:20,fontWeight:900,marginBottom:16}}>申請履歴</div><Card>{myReqs.filter(r=>!r.is_initial).length===0?<div style={{textAlign:"center",padding:"40px 0",color:GRAY,fontSize:13}}><div style={{fontSize:28,marginBottom:8}}>📋</div>申請がありません</div>:myReqs.filter(r=>!r.is_initial).map(r=>(<div key={r.id} style={{...row,flexWrap:"wrap",gap:8}}><div style={{flex:1,minWidth:160}}><div style={{display:"flex",alignItems:"center",gap:6,marginBottom:2}}><span style={{fontSize:14,fontWeight:700}}>{r.date}{r.type==="daily"&&(r.days||1)>1?` 〜 ${addDays(r.date,(r.days||Math.round(r.hours/HOURS_PER_DAY))-1)}`:""}{r.type==="half"?` ${r.half_type==="am"?"午前":"午後"}半休`:""} {hd(r.hours)}</span><TypeTag type={r.type} days={r.days} hours={r.hours}/></div>{r.reason&&<div style={{fontSize:12,color:GRAY}}>{r.reason}</div>}</div><Badge status={r.status}/>{r.status==="pending"&&(delReqConf===r.id?<div style={{display:"flex",gap:6,width:"100%"}}><button className="dangerBtn" style={{flex:1}} onClick={()=>{deleteReq(r.id);setDelReqConf(null);}}>取消確定</button><button className="secBtn" onClick={()=>setDelReqConf(null)}>戻る</button></div>:<div style={{display:"flex",gap:6,width:"100%",justifyContent:"flex-end"}}><button className="secBtn" style={{fontSize:12,padding:"4px 10px"}} onClick={()=>{setEditReq({...r,days:r.days||(r.hours/HOURS_PER_DAY),halfType:r.half_type||"am"});setEditReqReason(r.reason||"");setEditReqErr("");}}>✎ 修正</button><button className="dangerBtn" style={{fontSize:12,padding:"4px 10px"}} onClick={()=>setDelReqConf(r.id)}>申請取消</button></div>)}</div>))}</Card>{editReq&&<EditModal req={editReq} maxHourly={hourlyRemH+(requests.find(r=>r.id===editReq.id)?.hours||0)} maxRemain={remainH+(requests.find(r=>r.id===editReq.id)?.hours||0)} isEmp={true} onCancel={()=>setEditReq(null)} onSave={async(v)=>{await updateReq(editReq.id,{date:v.date,hours:v.hours,days:v.days,half_type:v.halfType,reason:v.reason,status:"pending"});setEditReq(null);}}/>}</ER>);
+
+  return null;
+}
+
+const CSS=`
+  @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700;900&display=swap');
+  *{box-sizing:border-box;}body{margin:0;}
+  .primaryBtn{display:block;width:100%;background:#c0181f;color:#fff;border:none;border-radius:6px;padding:13px;font-size:15px;font-weight:700;cursor:pointer;font-family:inherit;transition:background 0.15s;}
+  .primaryBtn:hover:not(:disabled){background:#a01015;}.primaryBtn:disabled{background:#ccc;cursor:not-allowed;}
+  .secBtn{background:#fff;color:#555;border:1px solid #ddd;border-radius:6px;padding:10px 16px;font-size:14px;cursor:pointer;font-family:inherit;transition:border-color 0.15s;}
+  .secBtn:hover{border-color:#999;}
+  .dangerBtn{background:none;color:#c0181f;border:1px solid #f0c0c0;border-radius:6px;padding:7px 14px;font-size:13px;cursor:pointer;font-family:inherit;}
+  .dangerBtn:hover{background:#fff0f0;}
+  .approveBtn{background:#fff8e0;color:#b07800;border:1px solid #f0d060;border-radius:6px;padding:6px 14px;font-size:13px;cursor:pointer;font-family:inherit;font-weight:600;}
+  .approveBtn:hover{background:#fff0c0;}
+  .rejectBtn{background:#fff0f0;color:#c0181f;border:1px solid #f0c0c0;border-radius:6px;padding:6px 14px;font-size:13px;cursor:pointer;font-family:inherit;}
+  .rejectBtn:hover{background:#ffe0e0;}
+  .backBtn{background:none;border:none;color:#888;font-size:13px;cursor:pointer;padding:0 0 16px;font-family:inherit;display:flex;align-items:center;gap:4px;}
+  .backBtn:hover{color:#333;}
+  .roleBtn{background:#fff;border:1px solid #e0e0e0;border-radius:10px;padding:24px 20px;cursor:pointer;width:100%;text-align:center;color:#1a1a1a;font-family:inherit;transition:border-color 0.15s,box-shadow 0.15s;}
+  .roleBtn:hover{border-color:#c0181f;box-shadow:0 2px 8px rgba(192,24,31,0.1);}
+  .empSelBtn{display:flex;align-items:center;gap:12px;background:#fff;border:1px solid #e0e0e0;border-radius:8px;padding:11px 14px;cursor:pointer;color:#1a1a1a;font-family:inherit;width:100%;transition:border-color 0.15s;}
+  .empSelBtn:hover{border-color:#aaa;}.empSelBtn.sel{border-color:#c0181f;background:#fff8f8;}
+  .empRow{display:flex;align-items:center;gap:12px;padding:14px 16px;border-radius:8px;border:1px solid #e8e8e8;margin-bottom:8px;background:#fff;cursor:pointer;transition:border-color 0.15s,box-shadow 0.15s;}
+  .empRow:hover{border-color:#c0181f;box-shadow:0 1px 6px rgba(192,24,31,0.08);}
+  .menuBtn{background:#fff;border:1px solid #e0e0e0;border-radius:10px;padding:20px 16px;cursor:pointer;color:#1a1a1a;font-family:inherit;font-size:14px;text-align:center;transition:border-color 0.15s,box-shadow 0.15s;margin-bottom:10px;}
+  .menuBtn:hover:not(:disabled){border-color:#c0181f;box-shadow:0 2px 8px rgba(192,24,31,0.1);}.menuBtn:disabled{opacity:0.4;cursor:not-allowed;}
+  input:focus,select:focus{border-color:#c0181f !important;box-shadow:0 0 0 3px rgba(192,24,31,0.08);}
+  textarea{border:1px solid #ddd;border-radius:6px;padding:11px 14px;font-size:15px;font-family:inherit;width:100%;outline:none;background:#fff;color:#1a1a1a;box-sizing:border-box;}
+  select option{background:#fff;}input:disabled,select:disabled,textarea:disabled{background:#f5f5f5;}
+  .animate-in{animation:fadeUp 0.25s ease both;}
+  @keyframes fadeUp{from{opacity:0;transform:translateY(6px);}to{opacity:1;transform:translateY(0);}}
+  @keyframes loading{0%{width:0%;margin-left:0;}50%{width:60%;}100%{width:0%;margin-left:100%;}}
+`;
